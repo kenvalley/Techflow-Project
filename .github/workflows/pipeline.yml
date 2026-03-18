@@ -85,8 +85,10 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           source: "scripts/*"
+          target: "~"
         #   target: "~/scripts/"
-          target: "/home/${{ secrets.EC2_USER }}/scripts"
+        #   target: "/home/${{ secrets.EC2_USER }}/scripts"
+
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -98,7 +100,7 @@ jobs:
             
             mkdir -p ~/scripts
             chmod +x ~/scripts/*.sh
-            
+
             APP_NAME=${{ env.APP_NAME }}
             DOCKER_REPO=${{ env.DOCKER_REPO }}
             VERSION=${{ needs.build-and-push.outputs.version }}
