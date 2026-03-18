@@ -1,0 +1,133 @@
+name: Techflow-app CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  APP_NAME: techflow-app
+  DOCKER_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/techflow-app
+  EMAIL_TO: ${{ vars.EMAIL_TO }}
+  EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+
+jobs:
+
+  # -----------------------------
+  # Job 1: Run Unit Tests
+  # -----------------------------
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover
+
+  # -----------------------------
+  # Job 2: Build & Push Docker Image
+  # -----------------------------
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.set_version.outputs.VERSION }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        id: set_version
+        run: echo "VERSION=v${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+      - name: Login to DockerHub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Pull latest (for previous tag)
+        run: docker pull $DOCKER_REPO:latest || true
+
+      - name: Tag previous
+        run: |
+          docker tag $DOCKER_REPO:latest $DOCKER_REPO:previous || true
+
+      - name: Build image
+        run: docker build -t $DOCKER_REPO:${{ steps.set_version.outputs.VERSION }} .
+
+      - name: Tag latest
+        run: docker tag $DOCKER_REPO:${{ steps.set_version.outputs.VERSION }} $DOCKER_REPO:latest
+
+      - name: Push images
+        run: |
+          docker push $DOCKER_REPO:${{ steps.set_version.outputs.VERSION }}
+          docker push $DOCKER_REPO:latest
+          docker push $DOCKER_REPO:previous || true
+
+  # -----------------------------
+  # Job 3: Deploy to EC2
+  # -----------------------------
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Copy scripts to EC2
+        uses: appleboy/scp-action@v0.1.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "scripts/*"
+          target: "~/scripts/"
+        #   target: "/home/${{ secrets.EC2_USER }}/scripts"
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            APP_NAME=${{ env.APP_NAME }}
+            DOCKER_REPO=${{ env.DOCKER_REPO }}
+            VERSION=${{ needs.build-and-push.outputs.version }}
+
+            IMAGE=$DOCKER_REPO:$VERSION
+
+            docker pull $IMAGE
+
+            docker stop $APP_NAME || true
+            docker rm $APP_NAME || true
+
+            docker run -d -p 5000:5000 --name $APP_NAME $IMAGE
+
+            ~/scripts/health_check.sh || ~/scripts/rollback.sh
+
+  # -----------------------------
+  # Job 4: Email Notification
+  # -----------------------------
+  notify:
+    needs: [test, build-and-push, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Send Email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "Techflow-app CI/CD Pipeline Status"
+          to: ${{ env.EMAIL_TO }}
+          from: ${{ env.EMAIL_FROM }}
+          body: |
+            Pipeline Status: ${{ job.status }}
+            App: ${{ env.APP_NAME }}
+            Version Deployed: v${{ github.run_number }}
